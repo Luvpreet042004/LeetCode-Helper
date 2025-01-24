@@ -29,11 +29,18 @@ async function queryLeetCodeAPI(query, variables) {
     }
 }
 
+function extractSlug(url) {
+    // Regular expression to match the problem slug
+    const match = url.match(/leetcode\.com\/problems\/([^/]+)\//);
+    return match ? match[1] : null;
+}
 // Function to fetch and display problem details
 async function fetchProblemDetails() {
-    const titleSlug = await vscode.window.showInputBox({
+    const url = await vscode.window.showInputBox({
         prompt: 'Enter the problem slug (e.g., "two-sum")'
     });
+
+    const titleSlug = extractSlug(url);
 
     if (!titleSlug) {
         vscode.window.showErrorMessage("Problem slug is required!");
