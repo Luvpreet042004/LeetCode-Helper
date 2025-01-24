@@ -1,7 +1,12 @@
 const vscode = require('vscode');
 const axios = require('axios');
 const path = require('path');
+const { exec } = require('child_process');
 const fs = require('fs');
+
+function countEqualsInString(inputString) {
+    return (inputString.match(/=/g) || []).length;
+}
 
 const GRAPHQL_ENDPOINT = "https://leetcode.com/graphql";
 
@@ -19,15 +24,15 @@ async function queryLeetCodeAPI(query, variables) {
         );
         return response.data;
     } catch (error) {
-        vscode.window.showErrorMessage(`Error: ${error}`);
+        vscode.window.showErrorMessage(`Error: ${error.message}`);
         return null;
     }
 }
 
-// Command to query a problem and show results
+// Function to fetch and display problem details
 async function fetchProblemDetails() {
     const titleSlug = await vscode.window.showInputBox({
-        prompt: 'Enter the problem slug (e.g., "two-sum")',
+        prompt: 'Enter the problem slug (e.g., "two-sum")'
     });
 
     if (!titleSlug) {
@@ -38,10 +43,17 @@ async function fetchProblemDetails() {
     const query = `
         query getProblemDetails($titleSlug: String!) {
             question(titleSlug: $titleSlug) {
+                questionId
                 title
                 titleSlug
                 content
                 difficulty
+                likes
+                dislikes
+                topicTags {
+                    name
+                }
+                isPaidOnly
                 exampleTestcases
             }
         }
@@ -51,35 +63,54 @@ async function fetchProblemDetails() {
     const data = await queryLeetCodeAPI(query, variables);
 
     if (!data || !data.data || !data.data.question) {
-        vscode.window.showErrorMessage("Failed to fetch problem details. Please check the problem slug.");
+        vscode.window.showErrorMessage("Failed to fetch problem details. Please check the problem slug or try again.");
         return;
     }
 
     const problem = data.data.question;
+
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
     if (!workspaceFolder) {
-        vscode.window.showErrorMessage("No workspace folder found. Open a folder in VS Code before running this command.");
+        vscode.window.showErrorMessage("No workspace folder found. Please open a folder in VS Code before running the command.");
         return;
     }
 
-    const testCasesDir = path.join(workspaceFolder, "testcases");
-    if (!fs.existsSync(testCasesDir)) {
-        fs.mkdirSync(testCasesDir);
+    const In = extractInputs(problem.content)
+
+    const inputs = problem.exampleTestcases
+    .split('\n')
+    .filter(input => input.trim() !== ""); // Remove empty lines
+
+    for (let i = 0; i < inputs.length; i++) {
+        if (inputs[i].includes('"')) { 
+            inputs[i] = inputs[i].replace(/"/g, ''); // Remove all occurrences of `"`
+        }
     }
 
-    // Save test cases in CPH-compatible format
-    problem.exampleTestcases.forEach((testCase, index) => {
-        const inputPath = path.join(testCasesDir, `input_${index + 1}.txt`);
-        const outputPath = path.join(testCasesDir, `output_${index + 1}.txt`);
-        fs.writeFileSync(inputPath, testCase.input);
-        fs.writeFileSync(outputPath, testCase.output);
+    const numOfInputs = countEqualsInString(In[0]); // Assuming the first input defines the structure
+    const groupedInputs = [];
+
+    // Group inputs based on the number of '=' (or terms in each input)
+    for (let i = 0; i < inputs.length; i += numOfInputs) {
+        const group = inputs.slice(i, i + numOfInputs).join('\n');
+        groupedInputs.push(group);
+    }
+
+    // Save grouped inputs to files
+    groupedInputs.forEach((input, index) => {
+        const inputFilePath = path.join(workspaceFolder, `input_${index + 1}.txt`);
+        fs.writeFileSync(inputFilePath, input.trim(), "utf-8");
     });
 
-    vscode.window.showInformationMessage(`Test cases saved in ${testCasesDir}`);
 
+const outputs = extractOutputs(problem.content)
+outputs.forEach((output, index) => {
+    const inputFilePath = path.join(workspaceFolder, `output_${index + 1}.txt`);
+    fs.writeFileSync(inputFilePath, output.trim(), "utf-8");
+});
 
-        // Open a webview to display the problem statement
+    // Open a webview to display the problem statement
     const panel = vscode.window.createWebviewPanel(
         "leetcodeHelper",
         `Problem: ${problem.title}`,
@@ -87,11 +118,92 @@ async function fetchProblemDetails() {
         {
             enableScripts: true, // Allow JavaScript in the webview
         }
-);
+    );
 
-// Set the HTML content of the webview
-panel.webview.html = getWebviewContent(problem);
+    // Set the HTML content of the webview
+    panel.webview.html = getWebviewContent(problem);
 
+    createSolutionTemplate(problem);
+}
+
+
+// Function to parse example test cases
+async function createSolutionTemplate(problem) {
+    const language = await vscode.window.showQuickPick(["C++", "Python", "JavaScript"], {
+        placeHolder: "Select your preferred programming language",
+    });
+
+    if (!language) {
+        vscode.window.showErrorMessage("You must select a programming language to proceed.");
+        return;
+    }
+
+    // Define solution templates for different languages
+    const templates = {
+        "C++": `
+// Problem: ${problem.title}
+// Difficulty: ${problem.difficulty}
+
+#include <iostream>
+using namespace std;
+
+void solution() {
+    // Your code here
+}
+
+int main() {
+    solution();
+    return 0;
+}
+`,
+        Python: `# Problem: ${problem.title}\n# Difficulty: ${problem.difficulty}\n\ndef solution():\n    # Your code here\n    pass\n\nif __name__ == "__main__":\n    solution()\n`,
+        JavaScript: `
+// Problem: ${problem.title}
+// Difficulty: ${problem.difficulty}
+
+function solution() {
+    // Your code here
+}
+
+solution();
+`,
+    };
+
+    // Map language to file extensions
+    const extensions = {
+        "C++": "cpp",
+        Python: "py",
+        JavaScript: "js",
+    };
+
+    const solutionTemplate = templates[language];
+    const fileExtension = extensions[language];
+
+    // Ask the user where to save the file
+    const uri = await vscode.window.showSaveDialog({
+        defaultUri: vscode.Uri.file(`solution.${fileExtension}`),
+        filters: {
+            [language]: [fileExtension],
+        },
+    });
+
+    if (!uri) {
+        vscode.window.showErrorMessage("No file selected. Operation canceled.");
+        return;
+    }
+
+    // Write the solution template to the file
+    const contentBuffer = Buffer.from(solutionTemplate, "utf8");
+    await vscode.workspace.fs.writeFile(uri, contentBuffer);
+
+    // Open the newly created file
+    const doc = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(doc);
+
+    vscode.window.showInformationMessage(`${language} template loaded successfully.`);
+}
+
+// Generate webview content
 function getWebviewContent(problem) {
     return `
         <!DOCTYPE html>
@@ -124,156 +236,131 @@ function getWebviewContent(problem) {
             <p class="difficulty">Difficulty: ${problem.difficulty}</p>
             <h2>Problem Statement</h2>
             <div>${problem.content}</div>
-            <h2>Example Testcases</h2>
-            <pre>${problem.exampleTestcases}</pre>
         </body>
         </html>
     `;
 }
 
-const language = await vscode.window.showQuickPick(["C++", "Python", "JavaScript"], {
-    placeHolder: "Select your preferred programming language",
-});
+function extractInputs(problemDescription) {
+    const inputPattern = /<strong>Input:<\/strong>\s*(.*?)\n/g;
+    const inputs = [];
+    let match;
 
-if (!language) {
-    vscode.window.showErrorMessage("You must select a programming language to proceed.");
-    return;
+    while ((match = inputPattern.exec(problemDescription)) !== null) {
+        inputs.push(match[1].trim()); // Capture the input values
+    }
+
+    return inputs;
 }
-
-// Define solution templates for different languages
-const templates = {
-    "C++": `
-// Problem: ${problem.title}
-// Difficulty: ${problem.difficulty}
-
-#include <iostream>
-using namespace std;
-
-void solution() {
-// Your code here
-}
-
-int main() {
-solution();
-return 0;
-}
-`,
-    Python: `# Problem: ${problem.title}\n# Difficulty: ${problem.difficulty}\n\ndef solution():\n    # Your code here\n    pass\n\nif __name__ == "__main__":\n    solution()\n`,
-    JavaScript: `
-// Problem: ${problem.title}
-// Difficulty: ${problem.difficulty}
-
-function solution() {
-// Your code here
-}
-
-solution();
-`,
-};
-
-const solutionTemplate = templates[language];
-
-// Create and open a new file with the selected language and template
-const doc = await vscode.workspace.openTextDocument({
-    content: solutionTemplate,
-    language: language.toLowerCase(), // Convert language to lowercase for VS Code
-});
-
-vscode.window.showTextDocument(doc);
-vscode.window.showInformationMessage(`${language} template loaded successfully.`);
-
-
-}
-
 async function runTestCases() {
     const editor = vscode.window.activeTextEditor;
 
     if (!editor) {
-        vscode.window.showErrorMessage("No active editor. Please open a file with your solution.");
+        vscode.window.showErrorMessage('No active editor found.');
         return;
     }
 
-    const userCode = editor.document.getText();
+    const filePath = editor.document.fileName;
+    const language = path.extname(filePath).slice(1); // Get file extension (e.g., cpp, py, js)
 
-    // Check workspace folder
-    if (!vscode.workspace.workspaceFolders) {
-        vscode.window.showErrorMessage("No workspace folder is open. Please open a workspace with testcases.json.");
+    const testDir = path.join(path.dirname(filePath)); 
+    if (!fs.existsSync(testDir)) {
+        vscode.window.showErrorMessage(`Test directory not found: ${testDir}`);
+        return;
+    }
+    // Correct directory for test cases
+    const inputs = fs.readdirSync(testDir).filter(file => file.startsWith('input_'));
+    const outputs = fs.readdirSync(testDir).filter(file => file.startsWith('output_'));
+
+    if (inputs.length !== outputs.length) {
+        vscode.window.showErrorMessage('Mismatch between input and output test cases.');
         return;
     }
 
-    const testCasesPath = path.join(vscode.workspace.workspaceFolders[0].uri.fsPath, "testcases.json");
-
-    if (!fs.existsSync(testCasesPath)) {
-        vscode.window.showErrorMessage(`Test cases file not found at ${testCasesPath}.`);
-        return;
-    }
-
-    // Parse test cases
-    let testCases;
-    try {
-        testCases = JSON.parse(fs.readFileSync(testCasesPath, "utf-8"));
-    } catch (error) {
-        vscode.window.showErrorMessage(`Failed to parse testcases.json: ${error.message}`);
-        return;
-    }
-
-    if (!Array.isArray(testCases) || !testCases.every(tc => "input" in tc && "output" in tc)) {
-        vscode.window.showErrorMessage("Invalid test cases format. Each test case should have 'input' and 'output' properties.");
-        return;
-    }
-
-    // Execute user code
     const results = [];
-    for (const testCase of testCases) {
-        try {
-            const result = eval(`
-                (function() {
-                    ${userCode}
-                    return solution(${JSON.stringify(testCase.input)});
-                })()
-            `);
-            results.push({ input: testCase.input, expected: testCase.output, actual: result });
-        } catch (error) {
-            results.push({ input: testCase.input, error: error.message });
-        }
+    for (let i = 0; i < inputs.length; i++) {
+        const inputFile = path.join(testDir, `input_${i + 1}.txt`);
+        const outputFile = path.join(testDir, `output_${i + 1}.txt`);
+
+        const actualOutput = await executeCode(filePath, language, inputFile);
+        const expectedOutput = fs.readFileSync(outputFile, 'utf8').trim();
+
+        results.push({
+            testCase: i + 1,
+            status: actualOutput === expectedOutput ? 'Pass' : 'Fail',
+            expected: expectedOutput,
+            actual: actualOutput,
+        });
     }
 
-    // Display results
-    const outputChannel = vscode.window.createOutputChannel("LeetCode Test Results");
-    outputChannel.show();
-    results.forEach((res, index) => {
-        outputChannel.appendLine(`Test Case ${index + 1}:`);
-        if (res.error) {
-            outputChannel.appendLine(`   ❌ Error: ${res.error}`);
-        } else if (res.actual === res.expected) {
-            outputChannel.appendLine(`   ✅ Passed`);
-        } else {
-            outputChannel.appendLine(`   ❌ Failed`);
-            outputChannel.appendLine(`      Input: ${JSON.stringify(res.input)}`);
-            outputChannel.appendLine(`      Expected: ${res.expected}`);
-            outputChannel.appendLine(`      Actual: ${res.actual}`);
-        }
-    });
+    displayResults(results);
 }
 
 
+  async function executeCode(filePath, language, inputFile) {
+    return new Promise((resolve, reject) => {
+      const commands = {
+        cpp: `g++ ${filePath} -o solution && solution < ${inputFile}`,
+        python: `python ${filePath} < ${inputFile}`,
+        java: `javac ${filePath} && java Solution < ${inputFile}`,
+        js: `node ${filePath} < ${inputFile}`,
+      };
+  
+      const command = commands[language];
+      if (!command) {
+        vscode.window.showErrorMessage(`Unsupported language: ${language}`);
+        reject();
+      }
+  
+      exec(command, { cwd: path.dirname(filePath) }, (error, stdout, stderr) => {
+        if (error) {
+            reject(stderr || error.message);
+        }
+        resolve(stdout.trim());
+    });
+    
+    });
+  }
 
+  function extractOutputs(html) {
+    // Regex to capture all occurrences of <strong>Output:</strong> followed by the output value
+    const regex = /<strong>Output:<\/strong>\s*([\w\[\]\-.,]+)/g;
+    const outputs = [];
+    let match;
 
+    while ((match = regex.exec(html)) !== null) {
+        outputs.push(match[1]); // Capture the output value
+    }
+
+    return outputs;
+}
+
+  function displayResults(results) {
+    const outputChannel = vscode.window.createOutputChannel('CPH Results');
+    outputChannel.clear();
+    outputChannel.appendLine('Test Case Results:\n');
+    results.forEach(result => {
+      outputChannel.appendLine(`Test Case ${result.testCase}: ${result.status}`);
+      if (result.status === 'Fail') {
+        outputChannel.appendLine(`  Expected: ${result.expected}`);
+        outputChannel.appendLine(`  Actual:   ${result.actual}`);
+      }
+      outputChannel.appendLine('');
+    });
+    outputChannel.show();
+  }
 
 function activate(context) {
-	
     let disposable = vscode.commands.registerCommand('leetcode.queryProblem', fetchProblemDetails);
     context.subscriptions.push(disposable);
 
     let runTestCasesCmd = vscode.commands.registerCommand("leetcode.runTestCases", runTestCases);
-context.subscriptions.push(runTestCasesCmd);
-
+    context.subscriptions.push(runTestCasesCmd);
 }
 
 function deactivate() {}
 
-
 module.exports = {
-	activate,
-	deactivate
-}
+    activate,
+    deactivate
+};
